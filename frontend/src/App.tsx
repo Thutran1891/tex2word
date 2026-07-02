@@ -71,7 +71,7 @@ export default function App() {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h1 className="text-2xl font-bold tracking-tight">
-                Công cụ soạn đề LaTeX
+                Công cụ convert LaTeX to Word &amp; TikZ to PNG
               </h1>
               <p className="text-indigo-100 text-sm mt-1">
                 Chuyển câu hỏi LaTeX sang Word &amp; vẽ hình TikZ thành ảnh.
