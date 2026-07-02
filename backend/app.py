@@ -22,7 +22,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from docx_exporter import export_questions_to_docx, omml_available
+import requests
+
+from docx_exporter import export_questions_to_docx, omml_available, TIKZ_API_URL
 
 app = FastAPI(title="tex2word", version="1.1.0")
 
@@ -54,6 +56,11 @@ class ConvertRequest(BaseModel):
     mode: Optional[str] = "equation"
 
 
+class TikzRequest(BaseModel):
+    source: str
+    transparent: Optional[bool] = True
+
+
 def _prepare(req: ConvertRequest):
     """Kiểm tra đầu vào chung cho cả 2 endpoint. Trả (text, meta, mode, fname)."""
     text = (req.text or "").strip()
@@ -81,6 +88,40 @@ def health():
         "status": "ok",
         "omml_available": omml_available(),
     }
+
+
+@app.post("/tikz-png")
+def tikz_png(req: TikzRequest):
+    """Biên dịch 1 đoạn mã TikZ thành PNG. Trả {image_base64} (chuỗi base64 của PNG).
+    Chấp nhận cả mã có/không bọc \\begin{tikzpicture} — server TikZ tự lo (mode=auto)."""
+    src = (req.source or "").strip()
+    if not src:
+        raise HTTPException(status_code=400, detail="Thiếu mã TikZ.")
+    try:
+        resp = requests.post(
+            TIKZ_API_URL,
+            json={
+                "source": src,
+                "mode": "auto",
+                "format": "png",
+                "density": 300,
+                "transparent": bool(req.transparent),
+                "return_log": True,
+            },
+            timeout=120,
+        )
+        data = resp.json()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Không gọi được server vẽ TikZ (có thể đang khởi động, thử lại sau ~30s): {e}",
+        )
+
+    if resp.ok and data.get("image_base64"):
+        return {"image_base64": data["image_base64"]}
+
+    log = data.get("log") or data.get("error") or "Không rõ lỗi biên dịch."
+    raise HTTPException(status_code=422, detail=f"Biên dịch TikZ lỗi:\n{str(log)[:2000]}")
 
 
 @app.post("/convert")
