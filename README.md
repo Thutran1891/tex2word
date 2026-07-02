@@ -3,6 +3,17 @@
 Web app **miễn phí**: dán các khối câu hỏi `\begin{ex}...\end{ex}` → tải về file `.docx`
 có công thức Toán (OMML — sửa được trong Word) + hình TikZ/tabular.
 
+## Bản chạy trực tuyến
+
+- **Trang web (frontend)**: https://tex2word.vercel.app
+- **API (backend)**: https://tex2word-api.onrender.com
+
+Hai chế độ xuất:
+- **Equation** — công thức chuyển sang Equation của Word (chỉnh sửa trực tiếp).
+- **LaTeX** — giữ nguyên `$..$` / `$$..$$` để dán qua MathType (file có hậu tố `-latex`).
+
+Đề có hình **TikZ/tabular** sẽ hiện modal tiến trình render từng hình; đề không có hình tải thẳng.
+
 ## Cấu trúc
 
 ```
