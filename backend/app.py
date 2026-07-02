@@ -54,6 +54,8 @@ class ConvertRequest(BaseModel):
     filename: Optional[str] = "de_thi.docx"
     # "equation" (mặc định — OMML, sửa được trong Word) hoặc "latex" (giữ $..$ cho MathType).
     mode: Optional[str] = "equation"
+    # True: in tiêu đề + các đề mục "Phần I/II/III/IV"; False: chỉ in câu hỏi.
+    show_header: Optional[bool] = True
 
 
 class TikzRequest(BaseModel):
@@ -131,7 +133,9 @@ def convert(req: ConvertRequest):
     fd, tmp_path = tempfile.mkstemp(suffix=".docx")
     os.close(fd)
     try:
-        export_questions_to_docx(text, tmp_path, meta=meta, math_mode=mode)
+        export_questions_to_docx(
+            text, tmp_path, meta=meta, math_mode=mode, show_header=bool(req.show_header)
+        )
     except Exception as e:
         try:
             os.remove(tmp_path)
@@ -160,7 +164,8 @@ def convert_stream(req: ConvertRequest):
             os.close(fd)
             try:
                 export_questions_to_docx(
-                    text, tmp_path, meta=meta, progress_cb=progress_cb, math_mode=mode
+                    text, tmp_path, meta=meta, progress_cb=progress_cb,
+                    math_mode=mode, show_header=bool(req.show_header),
                 )
                 with open(tmp_path, "rb") as f:
                     result["data"] = base64.b64encode(f.read()).decode("ascii")

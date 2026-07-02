@@ -826,7 +826,8 @@ def _emit_section_title(doc, title):
 
 
 def export_questions_to_docx(
-    full_text, output_path, meta=None, progress_cb=None, math_mode="equation"
+    full_text, output_path, meta=None, progress_cb=None, math_mode="equation",
+    show_header=True,
 ):
     """
     Phân tích full_text (toàn văn LaTeX có các khối ex) và ghi ra file .docx.
@@ -834,8 +835,10 @@ def export_questions_to_docx(
     - progress_cb(done, total, message) để báo tiến trình render hình (tùy chọn).
     - math_mode: "equation" (mặc định, OMML — sửa được trong Word) hoặc
                  "latex" (giữ nguyên $..$ / $$..$$ để dán vào MathType).
-    Câu hỏi tự gom theo loại và chèn tiêu đề "Phần I/II/III/IV..." (chỉ chèn các phần
-    thực sự có câu). Số câu đánh liên tục xuyên qua các phần.
+    - show_header: True -> in phần tiêu đề (trường/mã đề/họ tên) VÀ các đề mục
+                   "Phần I/II/III/IV"; False -> chỉ in các câu hỏi, bỏ hết tiêu đề/đề mục.
+    Câu hỏi tự gom theo loại và (khi show_header) chèn tiêu đề "Phần I/II/III/IV..."
+    (chỉ chèn các phần thực sự có câu). Số câu đánh liên tục xuyên qua các phần.
     Trả về output_path.
     """
     meta = meta or {}
@@ -862,7 +865,8 @@ def export_questions_to_docx(
             if di > 0:
                 doc.add_page_break()
             made_i = str(int(base_made) + di) if base_made.isdigit() else base_made
-            _add_header(doc, meta, made_override=made_i)
+            if show_header:
+                _add_header(doc, meta, made_override=made_i)
 
             # Gom câu hỏi theo qtype để chèn tiêu đề mục "Phần I/II/III/IV".
             # Các \section{} có sẵn trong nguồn được bỏ qua ở chế độ auto này.
@@ -876,7 +880,8 @@ def export_questions_to_docx(
                 qs = by_type.get(qtype) or []
                 if not qs:
                     continue
-                _emit_section_title(doc, SECTION_TITLES[qtype])
+                if show_header:
+                    _emit_section_title(doc, SECTION_TITLES[qtype])
                 for q in qs:
                     qno += 1
                     rendered = {}

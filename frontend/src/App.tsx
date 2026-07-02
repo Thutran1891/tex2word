@@ -142,6 +142,8 @@ function Tex2DocTab() {
   const [busy, setBusy] = useState<"" | "equation" | "latex">("");
   const [err, setErr] = useState<string>("");
   const [tikz, setTikz] = useState<{ done: number; total: number } | null>(null);
+  // Có in tiêu đề (header) + các đề mục "Phần I/II/III/IV" hay không.
+  const [showHeader, setShowHeader] = useState<boolean>(true);
 
   function updateMeta<K extends keyof Meta>(key: K, value: Meta[K]) {
     setMeta((m) => ({ ...m, [key]: value }));
@@ -162,7 +164,7 @@ function Tex2DocTab() {
     const resp = await fetch(`${API_URL}/convert-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, meta, filename: outName, mode }),
+      body: JSON.stringify({ text, meta, filename: outName, mode, show_header: showHeader }),
     });
     if (!resp.ok || !resp.body) {
       let msg = `Lỗi ${resp.status}`;
@@ -230,7 +232,7 @@ function Tex2DocTab() {
         const resp = await fetch(`${API_URL}/convert`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, meta, filename: outName, mode }),
+          body: JSON.stringify({ text, meta, filename: outName, mode, show_header: showHeader }),
         });
         if (!resp.ok) {
           let msg = `Lỗi ${resp.status}`;
@@ -285,6 +287,32 @@ function Tex2DocTab() {
           <h2 className="font-semibold text-slate-700 mb-3">Tên file tải về</h2>
           <Field label="" value={filename}
             onChange={setFilename} placeholder="de_thi.docx" />
+        </section>
+
+        <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+          <h2 className="font-semibold text-slate-700 mb-3">Tiêu đề &amp; đề mục</h2>
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+              <input
+                type="radio"
+                name="show-header"
+                checked={showHeader}
+                onChange={() => setShowHeader(true)}
+                className="h-4 w-4"
+              />
+              Có hiện tiêu đề và các đề mục
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+              <input
+                type="radio"
+                name="show-header"
+                checked={!showHeader}
+                onChange={() => setShowHeader(false)}
+                className="h-4 w-4"
+              />
+              Không hiện tiêu đề và các đề mục
+            </label>
+          </div>
         </section>
 
         <section className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900">
