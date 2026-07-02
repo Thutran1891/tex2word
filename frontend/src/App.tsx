@@ -36,9 +36,94 @@ export default function App() {
   const [filename, setFilename] = useState<string>("de_thi.docx");
   const [busy, setBusy] = useState<"" | "equation" | "latex">("");
   const [err, setErr] = useState<string>("");
+  // Tiến trình render TikZ; null = không hiện modal.
+  const [tikz, setTikz] = useState<{ done: number; total: number } | null>(null);
 
   function updateMeta<K extends keyof Meta>(key: K, value: Meta[K]) {
     setMeta((m) => ({ ...m, [key]: value }));
+  }
+
+  // Đếm số hình cần render server (TikZ + tabular) — khớp cách docx_exporter tách ảnh.
+  function countImages(src: string): number {
+    const tikz = (src.match(/\\begin\s*\{tikzpicture\}/g) || []).length;
+    const tabular = (src.match(/\\begin\s*\{tabular\}/g) || []).length;
+    return tikz + tabular;
+  }
+
+  function triggerDownload(blob: Blob, name: string) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function base64ToBlob(b64: string): Blob {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+  }
+
+  // Đường có hình: dùng /convert-stream để cập nhật thanh tiến trình theo từng hình.
+  async function streamConvert(
+    mode: "equation" | "latex",
+    outName: string,
+    imgCount: number
+  ) {
+    setTikz({ done: 0, total: imgCount });
+    const resp = await fetch(`${API_URL}/convert-stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, meta, filename: outName, mode }),
+    });
+    if (!resp.ok || !resp.body) {
+      let msg = `Lỗi ${resp.status}`;
+      try {
+        const j = await resp.json();
+        if (j?.detail) msg = j.detail;
+      } catch {
+        /* keep default */
+      }
+      throw new Error(msg);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let downloaded = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line) as {
+          type: string;
+          done?: number;
+          total?: number;
+          data?: string;
+          detail?: string;
+        };
+        if (msg.type === "progress") {
+          setTikz({ done: msg.done ?? 0, total: msg.total ?? imgCount });
+        } else if (msg.type === "done" && msg.data) {
+          setTikz((p) => (p ? { done: p.total, total: p.total } : p));
+          triggerDownload(base64ToBlob(msg.data), outName);
+          downloaded = true;
+        } else if (msg.type === "error") {
+          throw new Error(msg.detail || "Lỗi khi xuất Word.");
+        }
+      }
+    }
+    if (!downloaded) throw new Error("Máy chủ không trả về file. Cô thử lại nhé.");
   }
 
   async function handleConvert(mode: "equation" | "latex") {
@@ -57,36 +142,35 @@ export default function App() {
       const suffix = mode === "latex" ? "-latex" : "";
       return `${base}${suffix}.docx`;
     })();
+    const imgCount = countImages(text);
     setBusy(mode);
     try {
-      const resp = await fetch(`${API_URL}/convert`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, meta, filename: outName, mode }),
-      });
-      if (!resp.ok) {
-        let msg = `Lỗi ${resp.status}`;
-        try {
-          const j = await resp.json();
-          if (j?.detail) msg = j.detail;
-        } catch {
-          /* keep default */
+      if (imgCount === 0) {
+        // Không có hình -> tải nhanh, không cần modal tiến trình.
+        const resp = await fetch(`${API_URL}/convert`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, meta, filename: outName, mode }),
+        });
+        if (!resp.ok) {
+          let msg = `Lỗi ${resp.status}`;
+          try {
+            const j = await resp.json();
+            if (j?.detail) msg = j.detail;
+          } catch {
+            /* keep default */
+          }
+          throw new Error(msg);
         }
-        throw new Error(msg);
+        triggerDownload(await resp.blob(), outName);
+      } else {
+        await streamConvert(mode, outName, imgCount);
       }
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = outName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy("");
+      setTikz(null);
     }
   }
 
@@ -240,6 +324,56 @@ export default function App() {
       <footer className="max-w-6xl mx-auto px-6 py-8 text-center text-slate-400 text-sm">
         Miễn phí. Công thức &amp; hình vẽ render qua server ngoài (cần Internet).
       </footer>
+
+      {tikz && <TikzModal done={tikz.done} total={tikz.total} />}
+    </div>
+  );
+}
+
+function TikzModal({ done, total }: { done: number; total: number }) {
+  const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+  const R = 52;
+  const C = 2 * Math.PI * R;
+  const offset = C - (percent / 100) * C;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl px-10 py-8 w-[min(90vw,420px)] text-center">
+        <div className="relative mx-auto h-32 w-32">
+          <svg className="h-32 w-32 -rotate-90" viewBox="0 0 120 120">
+            <circle
+              cx="60" cy="60" r={R} fill="none"
+              stroke="#e2e8f0" strokeWidth="10"
+            />
+            <circle
+              cx="60" cy="60" r={R} fill="none"
+              stroke="#6366f1" strokeWidth="10" strokeLinecap="round"
+              strokeDasharray={C} strokeDashoffset={offset}
+              style={{ transition: "stroke-dashoffset 0.4s ease" }}
+            />
+          </svg>
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="text-2xl font-bold text-indigo-600">{percent}%</span>
+          </div>
+        </div>
+
+        <h3 className="mt-5 text-xl font-bold tracking-wide text-slate-800">
+          ĐANG XỬ LÝ TIKZ
+        </h3>
+        <p className="mt-1 text-indigo-600 font-medium">
+          Đã xong: {done} / {total} hình vẽ
+        </p>
+
+        <div className="mt-4 h-2.5 w-full rounded-full bg-slate-100 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-indigo-500"
+            style={{ width: `${percent}%`, transition: "width 0.4s ease" }}
+          />
+        </div>
+
+        <p className="mt-4 text-xs uppercase tracking-wider text-slate-400 leading-relaxed">
+          Hệ thống đang biên dịch tuần tự để đảm bảo độ ổn định
+        </p>
+      </div>
     </div>
   );
 }
