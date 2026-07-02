@@ -352,11 +352,14 @@ def parse_ex(raw):
 
     content = re.sub(r"\\diem\s*\{[^}]*\}", " ", content)
 
+    # Phân loại DỰA HOÀN TOÀN vào mã lệnh trong khối ex (theo thứ tự ưu tiên):
+    #   \choiceTF -> Đúng/Sai (DS), \shortans -> Trả lời ngắn (SA),
+    #   \choice   -> Trắc nghiệm (TN), còn lại -> Tự luận (TL).
+    # Lưu ý: "\choiceTF" chứa chuỗi con "\choice" nên has_choice phải loại trừ \choiceTF.
     has_tf = "\\choiceTF" in content
     has_sa = "\\shortans" in content
-    has_choice = "\\choice" in content
+    has_choice = re.search(r"\\choice(?!TF)", content) is not None
 
-    qtype = "TN"
     stem = content
     options = []
     statements = []
@@ -379,7 +382,8 @@ def parse_ex(raw):
         qtype = "TN"
         stem, options = _parse_choice_like(content, "\\choice")
     else:
-        qtype = "TL" if has_lg else "TN"
+        # Không có mã lệnh nào -> câu tự luận (bất kể có \loigiai hay không).
+        qtype = "TL"
         stem = content
 
     # Hậu kiểm: gắn lại placeholder hình bị sót (vd hình nằm sau \choice trong immini).
