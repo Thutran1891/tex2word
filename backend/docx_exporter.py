@@ -16,6 +16,7 @@ import os
 import re
 import glob
 import copy
+import time
 import base64
 from io import BytesIO
 from contextvars import ContextVar
@@ -539,9 +540,15 @@ def _trim_image(png_bytes):
         return png_bytes
 
 
-def _emit_image(paragraph, png_bytes):
+def _emit_image(paragraph, entry):
+    # entry: None | bytes | (png_bytes|None, reason) — chuẩn hoá về (bytes, reason).
+    if isinstance(entry, tuple):
+        png_bytes, reason = entry
+    else:
+        png_bytes, reason = entry, ""
     if not png_bytes:
-        _emit_text(paragraph, " [Hình: không tải được] ", {})
+        msg = " [Hình: không tải được%s] " % (" — " + reason if reason else "")
+        _emit_text(paragraph, msg, {})
         return
     try:
         png_bytes = _trim_image(png_bytes)
@@ -663,26 +670,55 @@ def _add_inline(doc, paragraph, text, rendered, fmt=None, allow_blocks=False):
 # ----------------------------------------------------------------------------
 # RENDER TIKZ
 # ----------------------------------------------------------------------------
-def _render_tikz(tikz_code, timeout=120):
-    try:
-        resp = requests.post(
-            TIKZ_API_URL,
-            json={
-                "source": tikz_code,
-                "mode": "auto",
-                "format": "png",
-                "density": 300,
-                "transparent": True,
-                "return_log": True,
-            },
-            timeout=timeout,
-        )
-        data = resp.json()
-        if resp.ok and data.get("image_base64"):
-            return base64.b64decode(data["image_base64"])
-    except Exception:
-        return None
-    return None
+def _render_tikz(tikz_code, timeout=120, retries=3):
+    """Biên dịch mã TikZ -> PNG qua server ngoài. Trả (png_bytes, reason).
+
+    - png_bytes: bytes ảnh PNG nếu thành công, None nếu hỏng.
+    - reason: '' khi OK; nếu hỏng là mô tả ngắn để chèn vào chỗ hình, giúp phân biệt
+      'server đang ngủ, thử lại' với 'mã TikZ sai' (không thử lại nữa cũng vô ích).
+
+    Server Render (gói free) hay ngủ nên lần gọi đầu dễ bị 502/timeout; ta thử lại
+    vài lần có giãn cách để đánh thức server rồi mới bỏ cuộc."""
+    last = "không rõ"
+    for attempt in range(retries):
+        try:
+            resp = requests.post(
+                TIKZ_API_URL,
+                json={
+                    "source": tikz_code,
+                    "mode": "auto",
+                    "format": "png",
+                    "density": 300,
+                    "transparent": True,
+                    "return_log": True,
+                },
+                timeout=timeout,
+            )
+        except requests.exceptions.Timeout:
+            last = "hết thời gian chờ"
+        except requests.exceptions.RequestException:
+            last = "không gọi được server"
+        else:
+            # Server đang khởi động (gateway của Render) -> đáng thử lại.
+            if resp.status_code in (502, 503, 504):
+                last = "server đang khởi động"
+            else:
+                try:
+                    data = resp.json()
+                except ValueError:
+                    data = {}
+                if resp.ok and data.get("image_base64"):
+                    try:
+                        return base64.b64decode(data["image_base64"]), ""
+                    except Exception:
+                        return None, "ảnh trả về hỏng"
+                # Server phản hồi bình thường nhưng không có ảnh -> mã TikZ biên dịch
+                # lỗi; thử lại cũng vô ích nên dừng ngay.
+                return None, "mã TikZ biên dịch lỗi"
+        # Còn lượt -> chờ giãn cách rồi thử lại (đánh thức server ngủ).
+        if attempt < retries - 1:
+            time.sleep(2 * (attempt + 1))
+    return None, last
 
 
 # ----------------------------------------------------------------------------
