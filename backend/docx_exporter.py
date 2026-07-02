@@ -670,15 +670,17 @@ def _add_inline(doc, paragraph, text, rendered, fmt=None, allow_blocks=False):
 # ----------------------------------------------------------------------------
 # RENDER TIKZ
 # ----------------------------------------------------------------------------
-def _render_tikz(tikz_code, timeout=120, retries=3):
-    """Biên dịch mã TikZ -> PNG qua server ngoài. Trả (png_bytes, reason).
+def compile_tikz_b64(tikz_code, transparent=True, timeout=120, retries=4):
+    """Gọi server TikZ để biên dịch mã -> PNG. Trả (image_base64, reason, is_compile_error).
 
-    - png_bytes: bytes ảnh PNG nếu thành công, None nếu hỏng.
-    - reason: '' khi OK; nếu hỏng là mô tả ngắn để chèn vào chỗ hình, giúp phân biệt
-      'server đang ngủ, thử lại' với 'mã TikZ sai' (không thử lại nữa cũng vô ích).
+    - image_base64: chuỗi base64 của PNG nếu thành công, None nếu hỏng.
+    - reason: '' khi OK; ngược lại là mô tả ngắn lý do hỏng.
+    - is_compile_error: True nếu server đã chạy nhưng MÃ TIKZ SAI (thử lại vô ích) ->
+      caller nên báo 422; False nếu lỗi tạm thời do server ngủ/mạng -> nên báo 502.
 
-    Server Render (gói free) hay ngủ nên lần gọi đầu dễ bị 502/timeout; ta thử lại
-    vài lần có giãn cách để đánh thức server rồi mới bỏ cuộc."""
+    Server compile-tikz (Render gói free) hay ngủ: lần gọi đầu thường trả 502/503 kèm
+    body HTML (không phải JSON) hoặc timeout. Ta THỬ LẠI vài lần có giãn cách để đánh
+    thức server; CHỈ khi nào server trả JSON hợp lệ mà thiếu ảnh mới coi là lỗi mã."""
     last = "không rõ"
     for attempt in range(retries):
         try:
@@ -689,36 +691,49 @@ def _render_tikz(tikz_code, timeout=120, retries=3):
                     "mode": "auto",
                     "format": "png",
                     "density": 300,
-                    "transparent": True,
+                    "transparent": bool(transparent),
                     "return_log": True,
                 },
                 timeout=timeout,
             )
         except requests.exceptions.Timeout:
-            last = "hết thời gian chờ"
+            last = "server phản hồi chậm (có thể đang khởi động)"
         except requests.exceptions.RequestException:
             last = "không gọi được server"
         else:
-            # Server đang khởi động (gateway của Render) -> đáng thử lại.
+            # Gateway của Render khi server đang thức dậy -> body không phải JSON -> thử lại.
             if resp.status_code in (502, 503, 504):
                 last = "server đang khởi động"
             else:
                 try:
                     data = resp.json()
                 except ValueError:
-                    data = {}
-                if resp.ok and data.get("image_base64"):
-                    try:
-                        return base64.b64decode(data["image_base64"]), ""
-                    except Exception:
-                        return None, "ảnh trả về hỏng"
-                # Server phản hồi bình thường nhưng không có ảnh -> mã TikZ biên dịch
-                # lỗi; thử lại cũng vô ích nên dừng ngay.
-                return None, "mã TikZ biên dịch lỗi"
-        # Còn lượt -> chờ giãn cách rồi thử lại (đánh thức server ngủ).
+                    # 2xx nhưng body rỗng/không phải JSON (proxy cold-start) -> thử lại.
+                    last = "server phản hồi rỗng"
+                else:
+                    if resp.ok and data.get("image_base64"):
+                        return data["image_base64"], "", False
+                    # Server chạy bình thường, trả JSON nhưng không có ảnh -> MÃ TIKZ SAI.
+                    log = (data.get("log") or data.get("error") or "").strip()
+                    msg = "mã TikZ biên dịch lỗi" + ((": " + log[:1500]) if log else "")
+                    return None, msg, True
+        # Còn lượt -> chờ giãn cách tăng dần rồi thử lại (đánh thức server ngủ).
         if attempt < retries - 1:
-            time.sleep(2 * (attempt + 1))
-    return None, last
+            time.sleep(3 * (attempt + 1))
+    return None, last, False
+
+
+def _render_tikz(tikz_code, timeout=120, retries=4):
+    """Bọc compile_tikz_b64 cho luồng xuất Word: trả (png_bytes, reason)."""
+    b64, reason, _is_compile = compile_tikz_b64(
+        tikz_code, transparent=True, timeout=timeout, retries=retries
+    )
+    if b64:
+        try:
+            return base64.b64decode(b64), ""
+        except Exception:
+            return None, "ảnh trả về hỏng"
+    return None, reason
 
 
 # ----------------------------------------------------------------------------

@@ -22,9 +22,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-import requests
-
-from docx_exporter import export_questions_to_docx, omml_available, TIKZ_API_URL
+from docx_exporter import (
+    export_questions_to_docx,
+    omml_available,
+    compile_tikz_b64,
+)
 
 app = FastAPI(title="tex2word", version="1.1.0")
 
@@ -99,31 +101,18 @@ def tikz_png(req: TikzRequest):
     src = (req.source or "").strip()
     if not src:
         raise HTTPException(status_code=400, detail="Thiếu mã TikZ.")
-    try:
-        resp = requests.post(
-            TIKZ_API_URL,
-            json={
-                "source": src,
-                "mode": "auto",
-                "format": "png",
-                "density": 300,
-                "transparent": bool(req.transparent),
-                "return_log": True,
-            },
-            timeout=120,
-        )
-        data = resp.json()
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(
-            status_code=502,
-            detail=f"Không gọi được server vẽ TikZ (có thể đang khởi động, thử lại sau ~30s): {e}",
-        )
 
-    if resp.ok and data.get("image_base64"):
-        return {"image_base64": data["image_base64"]}
+    # Dùng chung helper có THỬ LẠI (server Render hay ngủ nên request đầu dễ hỏng).
+    b64, reason, is_compile_error = compile_tikz_b64(src, transparent=bool(req.transparent))
+    if b64:
+        return {"image_base64": b64}
 
-    log = data.get("log") or data.get("error") or "Không rõ lỗi biên dịch."
-    raise HTTPException(status_code=422, detail=f"Biên dịch TikZ lỗi:\n{str(log)[:2000]}")
+    if is_compile_error:
+        raise HTTPException(status_code=422, detail=f"Biên dịch TikZ lỗi:\n{reason}")
+    raise HTTPException(
+        status_code=502,
+        detail=f"Không gọi được server vẽ TikZ (đã thử lại vài lần, có thể đang khởi động, thử lại sau ~30s): {reason}",
+    )
 
 
 @app.post("/convert")
