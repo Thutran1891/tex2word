@@ -1,0 +1,8 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+python-docx>=1.1
+lxml>=5.3
+latex2mathml>=3.77
+requests>=2.32
+Pillow>=11
+pydantic>=2.10

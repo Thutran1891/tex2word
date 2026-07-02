@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Outputs
+*.docx
+!backend/samples/*.docx
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
