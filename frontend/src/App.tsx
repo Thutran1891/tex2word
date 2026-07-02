@@ -96,13 +96,22 @@ export default function App() {
     <div className="min-h-screen">
       <header className="bg-gradient-to-r from-indigo-600 to-violet-600 text-white">
         <div className="max-w-6xl mx-auto px-6 py-5">
-          <h1 className="text-2xl font-bold tracking-tight">
-            Chuyển LaTeX thành Word
-          </h1>
-          <p className="text-indigo-100 text-sm mt-1">
-            Dán các khối <code className="bg-white/20 px-1 rounded">\begin&#123;ex&#125;…\end&#123;ex&#125;</code>
-            {" "}vào khung bên dưới, bấm nút để tải về file <b>.docx</b> (công thức Toán vẫn sửa được trong Word).
-          </p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight">
+                Chuyển LaTeX thành Word
+              </h1>
+              <p className="text-indigo-100 text-sm mt-1">
+                Dán các khối <code className="bg-white/20 px-1 rounded">\begin&#123;ex&#125;…\end&#123;ex&#125;</code>
+                {" "}vào khung bên dưới, bấm nút để tải về file <b>.docx</b> (công thức Toán vẫn sửa được trong Word).
+              </p>
+            </div>
+            <div className="text-right text-indigo-100 text-xs leading-relaxed shrink-0">
+              <div className="font-semibold text-white">Trần Thị Kim Thu</div>
+              <div>TRƯỜNG THPT CÂY DƯƠNG</div>
+              <div>0397 58 43 58</div>
+            </div>
+          </div>
         </div>
       </header>
 
