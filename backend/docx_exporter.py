@@ -426,6 +426,9 @@ def parse_document(full_text):
 def _clean_plain(s):
     s = re.sub(r"(?<!\\)%.*", "", s)                       # comment
     s = s.replace("\\lq\\lq", '"').replace("\\rq\\rq", '"')
+    # \dotfill / \hrulefill -> dòng chấm (PHẢI xử lý trước \dots vì \dotfill chứa \dots).
+    s = re.sub(r"\\dotfill\b", "." * 40, s)
+    s = re.sub(r"\\hrulefill\b", "." * 40, s)
     s = s.replace("\\dots", "…").replace("\\ldots", "…").replace("\\cdots", "…")
     s = re.sub(r"\\label\{[^}]*\}", "", s)
     s = re.sub(r"\\includegraphics(?:\[[^\]]*\])?\{[^}]*\}", "", s)
