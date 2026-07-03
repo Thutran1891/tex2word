@@ -2,6 +2,13 @@ import { useState } from "react";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
+// Server vẽ TikZ (gọi THẲNG từ trình duyệt như bên app exam — tin cậy hơn đi vòng
+// qua backend của mình vì fetch không đặt timeout: trình duyệt kiên nhẫn CHỜ server
+// Render tỉnh dậy, tránh cảnh "server phản hồi rỗng" khi 2 dịch vụ Render đều ngủ).
+const TIKZ_COMPILE_URL =
+  import.meta.env.VITE_TIKZ_URL ||
+  "https://compile-tikz-code.onrender.com/compile";
+
 const SAMPLE = String.raw`\begin{ex}
 Cho tập hợp $A = \{1;2;3\}$ và $B = \{2;3;4\}$. Tập $A \cap B$ bằng:
 \choice
@@ -393,6 +400,74 @@ function Tex2DocTab() {
   );
 }
 
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Biên dịch mã TikZ -> PNG base64. Gọi THẲNG server (như app exam) và tự thử lại
+// khi server Render còn ngủ (502/503/504 hoặc body rỗng). fetch không timeout nên
+// trình duyệt kiên nhẫn chờ server tỉnh dậy — đây là mấu chốt để hết "phản hồi rỗng".
+async function compileTikz(source: string, transparent: boolean): Promise<string> {
+  const body = JSON.stringify({
+    source,
+    mode: "auto",
+    format: "png",
+    density: 300,
+    transparent,
+    return_log: true,
+  });
+  const RETRIES = 3;
+  let lastErr = "Không rõ lỗi.";
+  for (let attempt = 0; attempt < RETRIES; attempt++) {
+    let resp: Response;
+    try {
+      resp = await fetch(TIKZ_COMPILE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+    } catch (e) {
+      lastErr =
+        "Không gọi được server (kiểm tra mạng): " +
+        (e instanceof Error ? e.message : String(e));
+      await sleep(2000 * (attempt + 1));
+      continue;
+    }
+
+    // Gateway Render đang đánh thức server -> thử lại.
+    if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
+      lastErr = `Server đang khởi động (mã ${resp.status}).`;
+      await sleep(3000 * (attempt + 1));
+      continue;
+    }
+
+    let data: { image_base64?: string; log?: string; error?: string; detail?: string } | null =
+      null;
+    try {
+      data = await resp.json();
+    } catch {
+      // 2xx nhưng body rỗng/không phải JSON (proxy cold-start) -> thử lại.
+      lastErr = "Server phản hồi rỗng (đang khởi động).";
+      await sleep(3000 * (attempt + 1));
+      continue;
+    }
+
+    if (resp.ok && data?.image_base64) {
+      return data.image_base64;
+    }
+
+    // Server chạy bình thường nhưng không trả ảnh -> lỗi MÃ TIKZ, dừng ngay.
+    const log = data?.log || data?.error || data?.detail || "";
+    const line = log.match(/^!.*$/m)?.[0] || "";
+    throw new Error(
+      "Biên dịch TikZ lỗi" + (line ? `: ${line}` : ". Cô kiểm tra lại mã TikZ nhé.")
+    );
+  }
+  throw new Error(
+    `${lastErr} Server có thể đang ngủ — cô đợi ~30s rồi bấm Convert lại giúp em.`
+  );
+}
+
 // ================= TAB 2: Tikz2PNG =================
 function Tikz2PngTab() {
   const [code, setCode] = useState<string>(TIKZ_SAMPLE);
@@ -412,23 +487,8 @@ function Tikz2PngTab() {
     setBusy(true);
     setPngB64("");
     try {
-      const resp = await fetch(`${API_URL}/tikz-png`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: code, transparent }),
-      });
-      if (!resp.ok) {
-        let msg = `Lỗi ${resp.status}`;
-        try {
-          const j = await resp.json();
-          if (j?.detail) msg = j.detail;
-        } catch {
-          /* keep default */
-        }
-        throw new Error(msg);
-      }
-      const j = (await resp.json()) as { image_base64: string };
-      setPngB64(j.image_base64);
+      const b64 = await compileTikz(code, transparent);
+      setPngB64(b64);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
