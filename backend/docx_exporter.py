@@ -842,18 +842,22 @@ def _add_tf_statements(doc, statements, rendered):
 
 
 def _add_question(doc, qno, q, rendered):
+    qtype = q["qtype"]
     p = doc.add_paragraph()
     cr = p.add_run("Câu %d. " % qno)
     cr.bold = True
     cr.font.color.rgb = CAU_VIOLET
+    # ĐS (đúng/sai): đánh dấu [TF] tô đậm ngay sau tiền tố "Câu X." (quy ước exam-genius-app).
+    if qtype == "DS":
+        p.add_run("[TF] ").bold = True
     _add_inline(doc, p, q["stem"], rendered, {}, allow_blocks=True)
 
-    qtype = q["qtype"]
     if qtype == "TN":
         _add_mc_options(doc, q["options"], rendered)
     elif qtype == "DS":
         _add_tf_statements(doc, q["statements"], rendered)
     elif qtype == "SA":
+        # TLN: đáp số trong cặp [[...]] đặt ở DÒNG RIÊNG, tách khỏi giả thiết.
         ap = doc.add_paragraph()
         ap.add_run("[[")
         _add_inline(doc, ap, q["answer"], rendered, {})
