@@ -66,6 +66,64 @@ function base64ToBlob(b64: string, mime: string): Blob {
   return new Blob([bytes], { type: mime });
 }
 
+// Một dòng NDJSON máy chủ trả về (tiến trình render / kết quả cuối).
+type StreamMsg = {
+  type: string;
+  done?: number;
+  total?: number;
+  data?: string;
+  html?: string;
+  detail?: string;
+};
+
+// Đọc luồng NDJSON, gọi onMsg cho từng dòng JSON.
+async function readNdjson(resp: Response, onMsg: (m: StreamMsg) => void) {
+  const reader = resp.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) onMsg(JSON.parse(line) as StreamMsg);
+    }
+  }
+}
+
+// In tài liệu HTML (đã có sẵn MathJax + script tự gọi print) qua iframe ẩn. Người dùng
+// chọn "Lưu thành PDF" trong hộp thoại In của trình duyệt để tải file PDF về máy.
+function printHtmlDoc(html: string) {
+  const old = document.getElementById("pdf-print-frame");
+  if (old) old.remove();
+  const iframe = document.createElement("iframe");
+  iframe.id = "pdf-print-frame";
+  iframe.style.position = "fixed";
+  iframe.style.right = "0";
+  iframe.style.bottom = "0";
+  iframe.style.width = "0";
+  iframe.style.height = "0";
+  iframe.style.border = "0";
+  document.body.appendChild(iframe);
+  const win = iframe.contentWindow;
+  const doc = win?.document;
+  if (!win || !doc) {
+    iframe.remove();
+    return;
+  }
+  // Dọn iframe sau khi in xong (hoặc sau 5 phút phòng khi người dùng để treo hộp thoại).
+  win.onafterprint = () => setTimeout(() => iframe.remove(), 200);
+  setTimeout(() => {
+    if (document.getElementById("pdf-print-frame")) iframe.remove();
+  }, 300000);
+  doc.open();
+  doc.write(html);
+  doc.close();
+}
+
 type TabKey = "tex2doc" | "tikz2png";
 
 export default function App() {
@@ -146,11 +204,15 @@ function Tex2DocTab() {
   const [text, setText] = useState<string>(SAMPLE);
   const [meta, setMeta] = useState<Meta>(emptyMeta);
   const [filename, setFilename] = useState<string>("de_thi.docx");
-  const [busy, setBusy] = useState<"" | "equation" | "latex">("");
+  const [busy, setBusy] = useState<"" | "equation" | "latex" | "pdf">("");
   const [err, setErr] = useState<string>("");
   const [tikz, setTikz] = useState<{ done: number; total: number } | null>(null);
   // Có in tiêu đề (header) + các đề mục "Phần I/II/III/IV" hay không.
   const [showHeader, setShowHeader] = useState<boolean>(true);
+  // true: xuất đầy đủ (đánh dấu đáp án + đáp số TLN + lời giải); false: chỉ có đề bài.
+  const [showAnswers, setShowAnswers] = useState<boolean>(true);
+  // Mở/đóng khối tuỳ chọn nội dung xuất.
+  const [contentOpen, setContentOpen] = useState<boolean>(false);
 
   function updateMeta<K extends keyof Meta>(key: K, value: Meta[K]) {
     setMeta((m) => ({ ...m, [key]: value }));
@@ -171,7 +233,7 @@ function Tex2DocTab() {
     const resp = await fetch(`${API_URL}/convert-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, meta, filename: outName, mode, show_header: showHeader }),
+      body: JSON.stringify({ text, meta, filename: outName, mode, show_header: showHeader, show_answers: showAnswers }),
     });
     if (!resp.ok || !resp.body) {
       let msg = `Lỗi ${resp.status}`;
@@ -239,7 +301,7 @@ function Tex2DocTab() {
         const resp = await fetch(`${API_URL}/convert`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, meta, filename: outName, mode, show_header: showHeader }),
+          body: JSON.stringify({ text, meta, filename: outName, mode, show_header: showHeader, show_answers: showAnswers }),
         });
         if (!resp.ok) {
           let msg = `Lỗi ${resp.status}`;
@@ -255,6 +317,84 @@ function Tex2DocTab() {
       } else {
         await streamConvert(mode, outName, imgCount);
       }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+      setTikz(null);
+    }
+  }
+
+  // Lấy HTML đề (đề không có hình) rồi in ra PDF ở trình duyệt.
+  async function fetchHtmlDirect(): Promise<string> {
+    const resp = await fetch(`${API_URL}/convert-html`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, meta, show_header: showHeader, show_answers: showAnswers }),
+    });
+    if (!resp.ok) {
+      let msg = `Lỗi ${resp.status}`;
+      try {
+        const j = await resp.json();
+        if (j?.detail) msg = j.detail;
+      } catch {
+        /* keep default */
+      }
+      throw new Error(msg);
+    }
+    const j = (await resp.json()) as { html?: string };
+    if (!j.html) throw new Error("Máy chủ không trả về nội dung. Cô thử lại nhé.");
+    return j.html;
+  }
+
+  // Đề có hình: stream tiến trình render TikZ, dòng cuối trả chuỗi HTML.
+  async function streamHtml(imgCount: number): Promise<string> {
+    setTikz({ done: 0, total: imgCount });
+    const resp = await fetch(`${API_URL}/convert-html-stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, meta, show_header: showHeader, show_answers: showAnswers }),
+    });
+    if (!resp.ok || !resp.body) {
+      let msg = `Lỗi ${resp.status}`;
+      try {
+        const j = await resp.json();
+        if (j?.detail) msg = j.detail;
+      } catch {
+        /* keep default */
+      }
+      throw new Error(msg);
+    }
+    let html = "";
+    await readNdjson(resp, (msg) => {
+      if (msg.type === "progress") {
+        setTikz({ done: msg.done ?? 0, total: msg.total ?? imgCount });
+      } else if (msg.type === "done" && msg.html) {
+        setTikz((p) => (p ? { done: p.total, total: p.total } : p));
+        html = msg.html;
+      } else if (msg.type === "error") {
+        throw new Error(msg.detail || "Lỗi khi tạo HTML.");
+      }
+    });
+    if (!html) throw new Error("Máy chủ không trả về nội dung. Cô thử lại nhé.");
+    return html;
+  }
+
+  async function handlePdf() {
+    setErr("");
+    if (!text.trim()) {
+      setErr("Cô ơi, chưa nhập nội dung LaTeX.");
+      return;
+    }
+    if (!text.includes("\\begin{ex}")) {
+      setErr("Không thấy khối \\begin{ex}...\\end{ex} trong nội dung.");
+      return;
+    }
+    const imgCount = countImages(text);
+    setBusy("pdf");
+    try {
+      const html = imgCount === 0 ? await fetchHtmlDirect() : await streamHtml(imgCount);
+      printHtmlDoc(html);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -320,6 +460,43 @@ function Tex2DocTab() {
               Không hiện tiêu đề và các đề mục
             </label>
           </div>
+        </section>
+
+        <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+          <button
+            type="button"
+            onClick={() => setContentOpen((v) => !v)}
+            className="w-full flex items-center justify-between font-semibold text-slate-700"
+          >
+            <span>Nội dung xuất</span>
+            <span className="text-slate-400 text-sm">
+              {contentOpen ? "▲ Thu gọn" : "▼ Mở rộng"}
+            </span>
+          </button>
+          {contentOpen && (
+            <div className="space-y-2 mt-3">
+              <label className="flex items-start gap-2 text-sm text-slate-700 cursor-pointer">
+                <input
+                  type="radio"
+                  name="show-answers"
+                  checked={showAnswers}
+                  onChange={() => setShowAnswers(true)}
+                  className="h-4 w-4 mt-0.5"
+                />
+                <span>Có đủ đề bài + đánh dấu đáp án + Lời giải <span className="text-slate-400">(mặc định)</span></span>
+              </label>
+              <label className="flex items-start gap-2 text-sm text-slate-700 cursor-pointer">
+                <input
+                  type="radio"
+                  name="show-answers"
+                  checked={!showAnswers}
+                  onChange={() => setShowAnswers(false)}
+                  className="h-4 w-4 mt-0.5"
+                />
+                <span>Chỉ có đề bài</span>
+              </label>
+            </div>
+          )}
         </section>
 
         <section className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900">
@@ -388,6 +565,15 @@ function Tex2DocTab() {
             title="Giữ nguyên $..$/$$..$$ trong Word — thuận tiện chuyển tiếp qua MathType trên máy."
           >
             {busy === "latex" ? (<><Spinner /> Đang chuyển…</>) : (<>🧮 Chuyển Word - LaTeX &amp; Tải về</>)}
+          </button>
+          <button
+            onClick={handlePdf}
+            disabled={busy !== ""}
+            className="inline-flex items-center gap-2 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-400 text-white font-semibold px-6 py-3 rounded-xl shadow-sm transition"
+            type="button"
+            title="Dựng đề dạng HTML rồi mở hộp thoại In của trình duyệt — chọn 'Lưu thành PDF' để tải về."
+          >
+            {busy === "pdf" ? (<><Spinner /> Đang tạo PDF…</>) : (<>📄 Chuyển PDF &amp; Tải về</>)}
           </button>
           <span className="text-sm text-slate-500">
             Máy chủ: <code>{API_URL}</code>

@@ -19,6 +19,7 @@ import copy
 import time
 import base64
 from io import BytesIO
+from html import escape as _html_escape
 from contextvars import ContextVar
 
 import requests
@@ -54,6 +55,10 @@ LOIGIAI_GREEN = RGBColor(0x00, 0x64, 0x00)    # chữ "Lời giải." (xanh lá 
 # Kiểu xuất công thức: "equation" -> OMML (sửa được trong Word),
 #                     "latex"    -> giữ nguyên $..$ / $$..$$ (dán vào MathType).
 _math_mode: ContextVar[str] = ContextVar("math_mode", default="equation")
+
+# True: xuất đầy đủ (đánh dấu đáp án đúng + đáp số TLN + Lời giải).
+# False: "chỉ có đề bài" — bỏ đánh dấu đáp án, bỏ [[đáp số]] TLN và bỏ Lời giải.
+_show_answers: ContextVar[bool] = ContextVar("show_answers", default=True)
 
 # Tiêu đề cho các nhóm câu hỏi (auto chèn theo qtype).
 SECTION_TITLES = {
@@ -813,32 +818,37 @@ def _opt_len(text):
 def _add_mc_options(doc, options, rendered):
     if not options:
         return
+    show = _show_answers.get()
     maxlen = max((_opt_len(o["text"]) for o in options), default=0)
     per_row = 4 if maxlen <= 12 else 2 if maxlen <= 30 else 1
     n = len(options)
 
     if per_row == 1:
         for idx, o in enumerate(options):
+            mark = show and o["correct"]
             p = doc.add_paragraph()
-            _style_label(p.add_run("%s. " % LABELS_MC[idx]), o["correct"])
-            _add_inline(doc, p, o["text"], rendered, {"underline": o["correct"]})
+            _style_label(p.add_run("%s. " % LABELS_MC[idx]), mark)
+            _add_inline(doc, p, o["text"], rendered, {"underline": mark})
         return
 
     rows = (n + per_row - 1) // per_row
     table = doc.add_table(rows=rows, cols=per_row)
     table.autofit = True
     for idx, o in enumerate(options):
+        mark = show and o["correct"]
         r, c = idx // per_row, idx % per_row
         para = table.cell(r, c).paragraphs[0]
-        _style_label(para.add_run("%s. " % LABELS_MC[idx]), o["correct"])
-        _add_inline(doc, para, o["text"], rendered, {"underline": o["correct"]})
+        _style_label(para.add_run("%s. " % LABELS_MC[idx]), mark)
+        _add_inline(doc, para, o["text"], rendered, {"underline": mark})
 
 
 def _add_tf_statements(doc, statements, rendered):
+    show = _show_answers.get()
     for idx, s in enumerate(statements):
+        mark = show and s["correct"]
         p = doc.add_paragraph()
-        _style_label(p.add_run("%s) " % LABELS_TF[idx]), s["correct"])
-        _add_inline(doc, p, s["text"], rendered, {"underline": s["correct"]})
+        _style_label(p.add_run("%s) " % LABELS_TF[idx]), mark)
+        _add_inline(doc, p, s["text"], rendered, {"underline": mark})
 
 
 def _add_question(doc, qno, q, rendered):
@@ -856,7 +866,7 @@ def _add_question(doc, qno, q, rendered):
         _add_mc_options(doc, q["options"], rendered)
     elif qtype == "DS":
         _add_tf_statements(doc, q["statements"], rendered)
-    elif qtype == "SA":
+    elif qtype == "SA" and _show_answers.get():
         # TLN: đáp số trong cặp [[...]] đặt ở DÒNG RIÊNG, tách khỏi giả thiết.
         ap = doc.add_paragraph()
         ap.add_run("[[")
@@ -864,7 +874,7 @@ def _add_question(doc, qno, q, rendered):
         ap.add_run("]]")
     # TL: phần hỏi đã nằm trong stem, không thêm gì.
 
-    if q["explanation"].strip():
+    if _show_answers.get() and q["explanation"].strip():
         lab = doc.add_paragraph()
         lab.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = lab.add_run("Lời giải.")
@@ -886,7 +896,7 @@ def _emit_section_title(doc, title):
 
 def export_questions_to_docx(
     full_text, output_path, meta=None, progress_cb=None, math_mode="equation",
-    show_header=True,
+    show_header=True, show_answers=True,
 ):
     """
     Phân tích full_text (toàn văn LaTeX có các khối ex) và ghi ra file .docx.
@@ -896,6 +906,8 @@ def export_questions_to_docx(
                  "latex" (giữ nguyên $..$ / $$..$$ để dán vào MathType).
     - show_header: True -> in phần tiêu đề (trường/mã đề/họ tên) VÀ các đề mục
                    "Phần I/II/III/IV"; False -> chỉ in các câu hỏi, bỏ hết tiêu đề/đề mục.
+    - show_answers: True -> đầy đủ (đánh dấu đáp án đúng + đáp số TLN + Lời giải);
+                    False -> "chỉ có đề bài" (bỏ đánh dấu đáp án, đáp số và lời giải).
     Câu hỏi tự gom theo loại và (khi show_header) chèn tiêu đề "Phần I/II/III/IV..."
     (chỉ chèn các phần thực sự có câu). Số câu đánh liên tục xuyên qua các phần.
     Trả về output_path.
@@ -904,6 +916,7 @@ def export_questions_to_docx(
     base_made = str(meta.get("made") or "").strip()
 
     token = _math_mode.set(math_mode if math_mode in ("equation", "latex") else "equation")
+    ans_token = _show_answers.set(bool(show_answers))
     try:
         # Tách thành nhiều ĐỀ theo mốc "% Đề N" mà worker chèn giữa các đề.
         # Mỗi đề lặp lại header; mã đề tăng dần từng đơn vị (+1).
@@ -956,3 +969,362 @@ def export_questions_to_docx(
         return output_path
     finally:
         _math_mode.reset(token)
+        _show_answers.reset(ans_token)
+
+
+# ----------------------------------------------------------------------------
+# XUẤT HTML (để in ra PDF ở trình duyệt)
+# ----------------------------------------------------------------------------
+# Dùng lại TOÀN BỘ parser + render TikZ ở trên; chỉ đổi "đầu ra": thay vì ghi vào
+# python-docx, ta ghép chuỗi HTML. Công thức giữ nguyên LaTeX và để MathJax (nạp qua
+# CDN trong tài liệu) render; hình TikZ nhúng base64. Bố cục/màu bám theo bản .docx.
+
+def _esc(s):
+    return _html_escape(s, quote=False)
+
+
+def _text_html(s, fmt):
+    """Đoạn chữ thường -> HTML (đã làm sạch lệnh LaTeX, escape, xuống dòng -> <br>)."""
+    s = _clean_plain(s)
+    parts = s.split("\n")
+    chunks = []
+    for k, part in enumerate(parts):
+        if k > 0:
+            chunks.append("<br>")
+        if part:
+            chunks.append(_esc(part))
+    inner = "".join(chunks)
+    if not inner.strip():
+        return inner  # giữ khoảng trắng ngăn cách nếu có
+    if fmt.get("bold"):
+        inner = "<b>%s</b>" % inner
+    if fmt.get("italic"):
+        inner = "<i>%s</i>" % inner
+    if fmt.get("underline"):
+        inner = "<u>%s</u>" % inner
+    return inner
+
+
+def _math_html(latex_math, display=False):
+    """Công thức -> để MathJax render: bọc \\(..\\) (inline) hoặc \\[..\\] (display).
+    Escape '<' và '&' để trình duyệt không hiểu nhầm là thẻ; MathJax vẫn đọc đúng ký tự."""
+    latex_math = _convert_custom_ex_commands(latex_math.strip())
+    if not latex_math.strip():
+        return ""
+    body = latex_math.replace("&", "&amp;").replace("<", "&lt;")
+    if display:
+        return '<div class="math-display">\\[%s\\]</div>' % body
+    return "\\(%s\\)" % body
+
+
+def _img_html(entry, block=False):
+    """Placeholder hình -> thẻ <img> base64 (hoặc thông báo lỗi nếu render hỏng)."""
+    if isinstance(entry, tuple):
+        png_bytes, reason = entry
+    else:
+        png_bytes, reason = entry, ""
+    if not png_bytes:
+        msg = "[Hình: không tải được%s]" % (" — " + reason if reason else "")
+        return '<span class="img-fail">%s</span>' % _esc(msg)
+    try:
+        png_bytes = _trim_image(png_bytes)
+        width = _img_width_cm(png_bytes)
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        style = ' style="width:%.2fcm"' % width if width else ""
+        img = '<img class="q-img" src="data:image/png;base64,%s"%s>' % (b64, style)
+    except Exception:
+        img = '<span class="img-fail">[Hình: lỗi chèn]</span>'
+    if block:
+        return '<div class="img-center">%s</div>' % img
+    return img
+
+
+def _inline_html(text, rendered, fmt=None, block_img=False):
+    """Song song với _add_inline nhưng sinh chuỗi HTML thay vì ghi paragraph.
+    block_img=True (đề bài, lời giải): ảnh xuống DÒNG RIÊNG, canh giữa."""
+    fmt = fmt or {}
+    text = _normalize_delims(_convert_custom_ex_commands(text.strip()))
+    i, n = 0, len(text)
+    buf = ""
+    out = []
+
+    def flush():
+        nonlocal buf
+        if buf:
+            out.append(_text_html(buf, fmt))
+            buf = ""
+
+    while i < n:
+        c = text[i]
+        # công thức
+        if c == "$":
+            display = False
+            if text[i:i + 2] == "$$":
+                close = text.find("$$", i + 2)
+                if close == -1:
+                    buf += text[i:]
+                    break
+                math = text[i + 2:close]
+                i = close + 2
+                display = True
+            else:
+                close = text.find("$", i + 1)
+                if close == -1:
+                    buf += text[i:]
+                    break
+                math = text[i + 1:close]
+                i = close + 1
+            flush()
+            out.append(_math_html(math, display))
+            continue
+        # hình
+        if c == "[" and text[i:i + 7] == "[IMG_ID":
+            m = re.match(r"\[IMG_ID_(\d+)\]", text[i:])
+            if m:
+                flush()
+                out.append(_img_html(rendered.get(int(m.group(1))), block=block_img))
+                i += m.end()
+                continue
+        # định dạng / xuống dòng / môi trường công thức hiển thị
+        if c == "\\":
+            me = _DISPLAY_ENV_RE.match(text, i)
+            if me:
+                endtok = "\\end{" + me.group(1) + "}"
+                endpos = text.find(endtok, i)
+                if endpos != -1:
+                    flush()
+                    out.append(_math_html(text[i:endpos + len(endtok)], display=True))
+                    i = endpos + len(endtok)
+                    continue
+            m = re.match(r"\\(textbf|textit|emph|underline|text)\s*\{", text[i:])
+            if m:
+                res = _extract_balanced(text, i + m.end() - 1)
+                if res:
+                    inner, end = res
+                    flush()
+                    nf = dict(fmt)
+                    cmd = m.group(1)
+                    if cmd == "textbf":
+                        nf["bold"] = True
+                    elif cmd in ("textit", "emph"):
+                        nf["italic"] = True
+                    elif cmd == "underline":
+                        nf["underline"] = True
+                    out.append(_inline_html(inner, rendered, nf, block_img=False))
+                    i = end + 1
+                    continue
+            if text[i:i + 2] == "\\\\":
+                flush()
+                out.append("<br>")
+                i += 2
+                m2 = re.match(r"\s*\[[^\]]*\]", text[i:])
+                if m2:
+                    i += m2.end()
+                continue
+        buf += c
+        i += 1
+    flush()
+    return "".join(out)
+
+
+def _mc_options_html(options, rendered):
+    if not options:
+        return ""
+    show = _show_answers.get()
+    maxlen = max((_opt_len(o["text"]) for o in options), default=0)
+    per_row = 4 if maxlen <= 12 else 2 if maxlen <= 30 else 1
+    cells = []
+    for idx, o in enumerate(options):
+        mark = show and o["correct"]
+        cls = "opt-label correct" if mark else "opt-label"
+        lab = '<span class="%s">%s.</span> ' % (cls, LABELS_MC[idx])
+        body = _inline_html(o["text"], rendered, {"underline": bool(mark)})
+        cells.append('<td class="opt-cell">%s%s</td>' % (lab, body))
+    rows = []
+    for r in range(0, len(cells), per_row):
+        rows.append("<tr>%s</tr>" % "".join(cells[r:r + per_row]))
+    return '<table class="opt-table"><tbody>%s</tbody></table>' % "".join(rows)
+
+
+def _tf_statements_html(statements, rendered):
+    show = _show_answers.get()
+    out = []
+    for idx, s in enumerate(statements):
+        mark = show and s["correct"]
+        cls = "opt-label correct" if mark else "opt-label"
+        lab = '<span class="%s">%s)</span> ' % (cls, LABELS_TF[idx])
+        body = _inline_html(s["text"], rendered, {"underline": bool(mark)})
+        out.append('<div class="tf-item">%s%s</div>' % (lab, body))
+    return "".join(out)
+
+
+def _question_html(qno, q, rendered):
+    qtype = q["qtype"]
+    prefix = '<span class="cau">Câu %d.</span> ' % qno
+    if qtype == "DS":
+        prefix += "<b>[TF]</b> "
+    parts = ['<p class="stem">%s%s</p>'
+             % (prefix, _inline_html(q["stem"], rendered, {}, block_img=True))]
+
+    if qtype == "TN":
+        parts.append(_mc_options_html(q["options"], rendered))
+    elif qtype == "DS":
+        parts.append(_tf_statements_html(q["statements"], rendered))
+    elif qtype == "SA" and _show_answers.get():
+        ans = _inline_html(q["answer"], rendered, {})
+        parts.append('<p class="sa-ans">[[%s]]</p>' % ans)
+
+    if _show_answers.get() and q["explanation"].strip():
+        parts.append('<p class="loigiai-label">Lời giải.</p>')
+        parts.append('<div class="loigiai">%s</div>'
+                     % _inline_html(q["explanation"], rendered, {}, block_img=True))
+    return '<div class="question">%s</div>' % "".join(parts)
+
+
+def _header_html(meta, made_override=None):
+    school = _esc((meta.get("school") or "").strip())
+    title = _esc((meta.get("title") or "").strip())
+    subject = _esc((meta.get("subject") or "").strip())
+    duration = _esc((meta.get("duration") or "").strip())
+    klass = _esc((meta.get("class_name") or "").strip())
+    made = made_override if made_override is not None else (meta.get("made") or "")
+    made = _esc(str(made).strip())
+
+    left = []
+    if school:
+        left.append('<p class="hdr-line"><b>%s</b></p>' % school)
+    if made:
+        left.append('<p class="hdr-line"><b>Mã đề: %s</b></p>' % made)
+
+    right = []
+    if title:
+        right.append('<p class="hdr-line hdr-title"><b>%s</b></p>' % title)
+    if subject:
+        right.append('<p class="hdr-line"><b>%s</b></p>' % subject)
+    if duration:
+        right.append('<p class="hdr-line">Thời gian: %s</p>' % duration)
+
+    name_line = ("Họ và tên thí sinh: " + "." * 30 + "  Lớp: "
+                 + (klass or "." * 6) + "   Điểm: " + "." * 6)
+    return (
+        '<table class="hdr-table"><tbody><tr>'
+        '<td class="hdr-left">%s</td><td class="hdr-right">%s</td>'
+        '</tr></tbody></table>'
+        '<p class="name-line">%s</p>' % ("".join(left), "".join(right), name_line)
+    )
+
+
+_HTML_CSS = """
+* { box-sizing: border-box; }
+body { font-family: "Times New Roman", serif; font-size: 12pt; color: #000;
+       margin: 0; line-height: 1.35; }
+.page { padding: 1.2cm 1.4cm; }
+.page + .page { page-break-before: always; }
+.hdr-table { width: 100%; border-collapse: collapse; margin-bottom: 6pt; }
+.hdr-table td { vertical-align: top; text-align: center; }
+.hdr-left { width: 45%; } .hdr-right { width: 55%; }
+.hdr-line { margin: 0; text-align: center; }
+.hdr-title { font-size: 13pt; }
+.name-line { margin: 10pt 0 14pt; }
+.section-title { text-align: center; font-weight: bold; font-size: 13pt;
+                 color: #8B5CF6; margin: 12pt 0 6pt; }
+.question { margin: 0 0 9pt; }
+.stem { margin: 4pt 0; text-align: justify; }
+.cau { font-weight: bold; color: #8B5CF6; }
+.opt-table { border-collapse: collapse; margin: 2pt 0; width: 100%; }
+.opt-cell { vertical-align: top; padding: 1pt 8pt 1pt 0; }
+.opt-label { font-weight: bold; color: #0000FF; }
+.opt-label.correct { text-decoration: underline; }
+.tf-item { margin: 2pt 0; }
+.sa-ans { margin: 2pt 0; }
+.loigiai-label { text-align: center; font-weight: bold; color: #006400;
+                 margin: 5pt 0 2pt; }
+.loigiai { margin: 0 0 6pt; text-align: justify; }
+.img-center { text-align: center; margin: 5pt 0; }
+.q-img { max-width: 100%; vertical-align: middle; }
+.img-fail { color: #b00020; font-style: italic; }
+@page { margin: 1.2cm 1.4cm; }
+@media print { .page { padding: 0; } }
+"""
+
+# Config MathJax + tự động mở hộp thoại In sau khi render xong (để lưu thành PDF).
+_HTML_HEAD_SCRIPT = """
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['\\\\(', '\\\\)']], displayMath: [['\\\\[', '\\\\]'], ['$$', '$$']] },
+  startup: {
+    pageReady: function () {
+      return MathJax.startup.defaultPageReady().then(function () {
+        setTimeout(function () { window.focus(); window.print(); }, 350);
+      });
+    }
+  }
+};
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+"""
+
+
+def export_questions_to_html(
+    full_text, meta=None, progress_cb=None, show_header=True, show_answers=True,
+):
+    """Như export_questions_to_docx nhưng TRẢ VỀ chuỗi HTML (một tài liệu hoàn chỉnh có
+    MathJax) để in ra PDF ở trình duyệt. Dùng lại parser + render TikZ; tôn trọng
+    show_header (tiêu đề + đề mục) và show_answers (đầy đủ / chỉ đề bài)."""
+    meta = meta or {}
+    base_made = str(meta.get("made") or "").strip()
+    ans_token = _show_answers.set(bool(show_answers))
+    try:
+        chunks = [c for c in re.split(r"%\s*Đề\s*\d+\s*", full_text) if "\\begin{ex}" in c]
+        if not chunks:
+            chunks = [full_text]
+
+        parsed = [parse_document(c) for c in chunks]
+        total_imgs = sum(
+            len(it["q"]["images"]) for items in parsed for it in items if it["type"] == "question"
+        )
+        done_imgs = 0
+
+        pages = []
+        for di, items in enumerate(parsed):
+            made_i = str(int(base_made) + di) if base_made.isdigit() else base_made
+            body = []
+            if show_header:
+                body.append(_header_html(meta, made_override=made_i))
+
+            by_type = {"TN": [], "DS": [], "SA": [], "TL": []}
+            for it in items:
+                if it["type"] == "question":
+                    by_type.setdefault(it["q"]["qtype"], []).append(it["q"])
+
+            qno = 0
+            for qtype in SECTION_ORDER:
+                qs = by_type.get(qtype) or []
+                if not qs:
+                    continue
+                if show_header:
+                    body.append('<div class="section-title">%s</div>'
+                                % _esc(SECTION_TITLES[qtype]))
+                for q in qs:
+                    qno += 1
+                    rendered = {}
+                    for k, code in enumerate(q["images"]):
+                        if progress_cb:
+                            progress_cb(done_imgs, total_imgs,
+                                        "Đang vẽ hình %d/%d" % (done_imgs + 1, max(1, total_imgs)))
+                        rendered[k] = _render_tikz(code)
+                        done_imgs += 1
+                    body.append(_question_html(qno, q, rendered))
+
+            pages.append('<div class="page">%s</div>' % "".join(body))
+
+        return (
+            "<!doctype html>\n<html lang=\"vi\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>%s</title>\n<style>%s</style>\n%s</head>"
+            "<body>%s</body></html>"
+            % (_esc((meta.get("title") or "Đề thi").strip() or "Đề thi"),
+               _HTML_CSS, _HTML_HEAD_SCRIPT, "".join(pages))
+        )
+    finally:
+        _show_answers.reset(ans_token)

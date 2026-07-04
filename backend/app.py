@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from docx_exporter import (
     export_questions_to_docx,
+    export_questions_to_html,
     omml_available,
     compile_tikz_b64,
 )
@@ -58,6 +59,8 @@ class ConvertRequest(BaseModel):
     mode: Optional[str] = "equation"
     # True: in tiêu đề + các đề mục "Phần I/II/III/IV"; False: chỉ in câu hỏi.
     show_header: Optional[bool] = True
+    # True: đầy đủ (đánh dấu đáp án + đáp số TLN + Lời giải); False: chỉ có đề bài.
+    show_answers: Optional[bool] = True
 
 
 class TikzRequest(BaseModel):
@@ -123,7 +126,8 @@ def convert(req: ConvertRequest):
     os.close(fd)
     try:
         export_questions_to_docx(
-            text, tmp_path, meta=meta, math_mode=mode, show_header=bool(req.show_header)
+            text, tmp_path, meta=meta, math_mode=mode,
+            show_header=bool(req.show_header), show_answers=bool(req.show_answers),
         )
     except Exception as e:
         try:
@@ -155,6 +159,7 @@ def convert_stream(req: ConvertRequest):
                 export_questions_to_docx(
                     text, tmp_path, meta=meta, progress_cb=progress_cb,
                     math_mode=mode, show_header=bool(req.show_header),
+                    show_answers=bool(req.show_answers),
                 )
                 with open(tmp_path, "rb") as f:
                     result["data"] = base64.b64encode(f.read()).decode("ascii")
@@ -190,6 +195,73 @@ def convert_stream(req: ConvertRequest):
             ) + "\n"
 
     # X-Accel-Buffering: no để tránh proxy gom buffer, đảm bảo tiến trình về ngay.
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
+@app.post("/convert-html")
+def convert_html(req: ConvertRequest):
+    """Trả HTML (một tài liệu hoàn chỉnh có MathJax) để client in ra PDF. Dùng khi đề
+    KHÔNG có TikZ/tabular (nhanh, không cần thanh tiến trình)."""
+    text, meta, _mode, _fname = _prepare(req)
+    try:
+        html = export_questions_to_html(
+            text, meta=meta, show_header=bool(req.show_header),
+            show_answers=bool(req.show_answers),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi tạo HTML: {e}")
+    return {"html": html}
+
+
+@app.post("/convert-html-stream")
+def convert_html_stream(req: ConvertRequest):
+    """Như /convert-stream nhưng dòng cuối chứa chuỗi HTML (field 'html') thay vì file
+    .docx — dùng khi đề CÓ hình để hiện thanh tiến trình render TikZ."""
+    text, meta, _mode, _fname = _prepare(req)
+
+    def generate():
+        q: "queue.Queue" = queue.Queue()
+        result: dict = {}
+
+        def progress_cb(done, total, message):
+            q.put({"type": "progress", "done": done, "total": total, "message": message})
+
+        def worker():
+            try:
+                result["html"] = export_questions_to_html(
+                    text, meta=meta, progress_cb=progress_cb,
+                    show_header=bool(req.show_header), show_answers=bool(req.show_answers),
+                )
+            except Exception as e:  # noqa: BLE001 - báo lỗi về client qua stream
+                result["error"] = str(e)
+            finally:
+                q.put(None)  # sentinel: worker xong
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            yield json.dumps(item, ensure_ascii=False) + "\n"
+        t.join()
+
+        if "error" in result:
+            yield json.dumps(
+                {"type": "error", "detail": f"Lỗi khi tạo HTML: {result['error']}"},
+                ensure_ascii=False,
+            ) + "\n"
+        else:
+            yield json.dumps(
+                {"type": "done", "html": result["html"]},
+                ensure_ascii=False,
+            ) + "\n"
+
     return StreamingResponse(
         generate(),
         media_type="application/x-ndjson",
