@@ -97,9 +97,16 @@ async function readNdjson(resp: Response, onMsg: (m: StreamMsg) => void) {
 // Mở tài liệu HTML (đã có sẵn MathJax SVG + script tự gọi print) trong iframe ẩn để bật
 // hộp thoại In của trình duyệt → người dùng chọn "Lưu thành PDF". Trình duyệt phân trang
 // theo dòng (không cắt ngang chữ) và giữ chữ vector chọn/copy được.
-function printHtmlDoc(html: string) {
+// docTitle: khi in iframe, Chrome/Edge lấy TÊN FILE gợi ý từ <title> của TRANG CHA (bỏ qua
+// <title> trong iframe), nên ta tạm đổi document.title = tên file rồi trả lại sau khi in.
+function printHtmlDoc(html: string, docTitle: string) {
   const old = document.getElementById("pdf-print-frame");
   if (old) old.remove();
+  const originalTitle = document.title;
+  document.title = docTitle;
+  const restoreTitle = () => {
+    document.title = originalTitle;
+  };
   const iframe = document.createElement("iframe");
   iframe.id = "pdf-print-frame";
   iframe.style.position = "fixed";
@@ -112,12 +119,17 @@ function printHtmlDoc(html: string) {
   const win = iframe.contentWindow;
   const doc = win?.document;
   if (!win || !doc) {
+    restoreTitle();
     iframe.remove();
     return;
   }
-  // Dọn iframe sau khi in xong (hoặc sau 5 phút phòng khi người dùng để treo hộp thoại).
-  win.onafterprint = () => setTimeout(() => iframe.remove(), 200);
+  // Trả lại tiêu đề + dọn iframe sau khi in xong (hoặc sau 5 phút nếu để treo hộp thoại).
+  win.onafterprint = () => {
+    restoreTitle();
+    setTimeout(() => iframe.remove(), 200);
+  };
   setTimeout(() => {
+    restoreTitle();
     if (document.getElementById("pdf-print-frame")) iframe.remove();
   }, 300000);
   doc.open();
@@ -395,7 +407,8 @@ function Tex2DocTab() {
     setBusy("pdf");
     try {
       const html = imgCount === 0 ? await fetchHtmlDirect() : await streamHtml(imgCount);
-      printHtmlDoc(html);
+      const pdfBase = filename.replace(/\.(docx|pdf)$/i, "").trim() || "de_thi";
+      printHtmlDoc(html, pdfBase);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
