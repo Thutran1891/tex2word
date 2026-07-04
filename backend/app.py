@@ -206,11 +206,12 @@ def convert_stream(req: ConvertRequest):
 def convert_html(req: ConvertRequest):
     """Trả HTML (một tài liệu hoàn chỉnh có MathJax) để client in ra PDF. Dùng khi đề
     KHÔNG có TikZ/tabular (nhanh, không cần thanh tiến trình)."""
-    text, meta, _mode, _fname = _prepare(req)
+    text, meta, _mode, fname = _prepare(req)
+    pdf_name = fname[:-5] + ".pdf"
     try:
         html = export_questions_to_html(
             text, meta=meta, show_header=bool(req.show_header),
-            show_answers=bool(req.show_answers),
+            show_answers=bool(req.show_answers), pdf_name=pdf_name,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi khi tạo HTML: {e}")
@@ -221,7 +222,8 @@ def convert_html(req: ConvertRequest):
 def convert_html_stream(req: ConvertRequest):
     """Như /convert-stream nhưng dòng cuối chứa chuỗi HTML (field 'html') thay vì file
     .docx — dùng khi đề CÓ hình để hiện thanh tiến trình render TikZ."""
-    text, meta, _mode, _fname = _prepare(req)
+    text, meta, _mode, fname = _prepare(req)
+    pdf_name = fname[:-5] + ".pdf"
 
     def generate():
         q: "queue.Queue" = queue.Queue()
@@ -235,6 +237,7 @@ def convert_html_stream(req: ConvertRequest):
                 result["html"] = export_questions_to_html(
                     text, meta=meta, progress_cb=progress_cb,
                     show_header=bool(req.show_header), show_answers=bool(req.show_answers),
+                    pdf_name=pdf_name,
                 )
             except Exception as e:  # noqa: BLE001 - báo lỗi về client qua stream
                 result["error"] = str(e)

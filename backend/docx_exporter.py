@@ -17,6 +17,7 @@ import re
 import glob
 import copy
 import time
+import json
 import base64
 from io import BytesIO
 from html import escape as _html_escape
@@ -675,17 +676,21 @@ def _add_inline(doc, paragraph, text, rendered, fmt=None, allow_blocks=False):
 # ----------------------------------------------------------------------------
 # RENDER TIKZ
 # ----------------------------------------------------------------------------
-def compile_tikz_b64(tikz_code, transparent=True, timeout=120, retries=4):
+def compile_tikz_b64(tikz_code, transparent=True, timeout=120, retries=7, on_retry=None):
     """Gọi server TikZ để biên dịch mã -> PNG. Trả (image_base64, reason, is_compile_error).
 
     - image_base64: chuỗi base64 của PNG nếu thành công, None nếu hỏng.
     - reason: '' khi OK; ngược lại là mô tả ngắn lý do hỏng.
     - is_compile_error: True nếu server đã chạy nhưng MÃ TIKZ SAI (thử lại vô ích) ->
       caller nên báo 422; False nếu lỗi tạm thời do server ngủ/mạng -> nên báo 502.
+    - on_retry(attempt, reason): gọi TRƯỚC mỗi lần chờ thử lại (để caller phát nhịp tim
+      giữ kết nối stream sống, tránh proxy Render cắt khi chờ server ngủ dậy).
 
     Server compile-tikz (Render gói free) hay ngủ: lần gọi đầu thường trả 502/503 kèm
-    body HTML (không phải JSON) hoặc timeout. Ta THỬ LẠI vài lần có giãn cách để đánh
-    thức server; CHỈ khi nào server trả JSON hợp lệ mà thiếu ảnh mới coi là lỗi mã."""
+    body HTML (không phải JSON) hoặc timeout. Cold-start có thể mất ~30-60s, nên ta THỬ
+    LẠI KIÊN NHẪN (mặc định 7 lần, tổng giãn cách ~63s) để "sống lâu hơn" thời gian server
+    thức dậy — giống trình duyệt bên app exam chờ không timeout. CHỈ khi server trả JSON
+    hợp lệ mà thiếu ảnh mới coi là lỗi mã (dừng ngay, không thử lại)."""
     last = "không rõ"
     for attempt in range(retries):
         try:
@@ -724,14 +729,16 @@ def compile_tikz_b64(tikz_code, transparent=True, timeout=120, retries=4):
                     return None, msg, True
         # Còn lượt -> chờ giãn cách tăng dần rồi thử lại (đánh thức server ngủ).
         if attempt < retries - 1:
+            if on_retry:
+                on_retry(attempt + 1, last)
             time.sleep(3 * (attempt + 1))
     return None, last, False
 
 
-def _render_tikz(tikz_code, timeout=120, retries=4):
+def _render_tikz(tikz_code, timeout=120, retries=7, on_retry=None):
     """Bọc compile_tikz_b64 cho luồng xuất Word: trả (png_bytes, reason)."""
     b64, reason, _is_compile = compile_tikz_b64(
-        tikz_code, transparent=True, timeout=timeout, retries=retries
+        tikz_code, transparent=True, timeout=timeout, retries=retries, on_retry=on_retry
     )
     if b64:
         try:
@@ -961,7 +968,13 @@ def export_questions_to_docx(
                         if progress_cb:
                             progress_cb(done_imgs, total_imgs,
                                         "Đang vẽ hình %d/%d" % (done_imgs + 1, max(1, total_imgs)))
-                        rendered[k] = _render_tikz(code)
+                        # Nhịp tim khi server hình còn ngủ: giữ kết nối stream sống,
+                        # tránh Render cắt trong lúc chờ ~60s cold-start.
+                        def _hb(attempt, reason, _d=done_imgs):
+                            if progress_cb:
+                                progress_cb(_d, total_imgs,
+                                            "Máy chủ hình đang khởi động, thử lại lần %d…" % attempt)
+                        rendered[k] = _render_tikz(code, on_retry=_hb)
                         done_imgs += 1
                     _add_question(doc, qno, q, rendered)
 
@@ -1247,20 +1260,62 @@ body { font-family: "Times New Roman", serif; font-size: 12pt; color: #000;
 @media print { .page { padding: 0; } }
 """
 
-# Config MathJax + tự động mở hộp thoại In sau khi render xong (để lưu thành PDF).
-# Dùng bản SVG (không phải CHTML): công thức thành hình vector TỰ CHỨA, in ra chuẩn,
-# KHÔNG phụ thuộc web-font — tránh lỗi công thức rỗng khi Chrome in trước lúc nạp font.
-# fontCache='none' để mỗi công thức nhúng path riêng (không tham chiếu <defs> chung, an
-# toàn khi in/sao chép).
+# Nạp html2pdf + MathJax, tự dựng PDF và TẢI THẲNG về (không mở hộp thoại In).
+# - MathJax bản SVG, fontCache='none': công thức thành hình vector TỰ CHỨA (không phụ
+#   thuộc web-font). Trước khi chụp, đổi mỗi <svg> công thức thành <img> data-URI để
+#   html2canvas chụp CHẮC CHẮN (html2canvas hay bỏ sót <svg> nội tuyến).
+# - Chờ mọi ảnh (công thức + hình TikZ) decode xong rồi mới dựng PDF; xong thì báo cho
+#   trang cha qua postMessage để dọn iframe. __PDF_NAME__ được thay bằng tên file.
 _HTML_HEAD_SCRIPT = """
+<script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.3/dist/html2pdf.bundle.min.js"></script>
 <script>
+var PDF_NAME = __PDF_NAME__;
+function _notifyDone() {
+  try { window.parent.postMessage({ __tex2word: 'pdf-done' }, '*'); } catch (e) {}
+}
+function _svgToImg() {
+  var list = document.querySelectorAll('mjx-container svg');
+  for (var i = 0; i < list.length; i++) {
+    var svg = list[i];
+    var rect = svg.getBoundingClientRect();
+    var clone = svg.cloneNode(true);
+    clone.setAttribute('width', rect.width);
+    clone.setAttribute('height', rect.height);
+    var xml = new XMLSerializer().serializeToString(clone);
+    var uri = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+    var img = document.createElement('img');
+    img.src = uri;
+    img.style.width = rect.width + 'px';
+    img.style.height = rect.height + 'px';
+    img.style.verticalAlign = 'middle';
+    var c = svg.closest('mjx-container');
+    if (c && c.parentNode) c.parentNode.replaceChild(img, c);
+  }
+}
+function _makePdf() {
+  try { _svgToImg(); } catch (e) {}
+  var imgs = Array.prototype.slice.call(document.images);
+  Promise.all(imgs.map(function (im) {
+    if (im.complete) return Promise.resolve();
+    return new Promise(function (res) { im.onload = im.onerror = res; });
+  })).then(function () {
+    return html2pdf().set({
+      margin: 0,
+      filename: PDF_NAME,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      pagebreak: { mode: ['css', 'legacy'] }
+    }).from(document.body).save();
+  }).then(_notifyDone, _notifyDone);
+}
 window.MathJax = {
   tex: { inlineMath: [['\\\\(', '\\\\)']], displayMath: [['\\\\[', '\\\\]'], ['$$', '$$']] },
   svg: { fontCache: 'none' },
   startup: {
     pageReady: function () {
       return MathJax.startup.defaultPageReady().then(function () {
-        setTimeout(function () { window.focus(); window.print(); }, 300);
+        setTimeout(_makePdf, 200);
       });
     }
   }
@@ -1272,10 +1327,12 @@ window.MathJax = {
 
 def export_questions_to_html(
     full_text, meta=None, progress_cb=None, show_header=True, show_answers=True,
+    pdf_name="de_thi.pdf",
 ):
     """Như export_questions_to_docx nhưng TRẢ VỀ chuỗi HTML (một tài liệu hoàn chỉnh có
-    MathJax) để in ra PDF ở trình duyệt. Dùng lại parser + render TikZ; tôn trọng
-    show_header (tiêu đề + đề mục) và show_answers (đầy đủ / chỉ đề bài)."""
+    MathJax + html2pdf) để dựng PDF và TẢI THẲNG về ở trình duyệt. Dùng lại parser +
+    render TikZ; tôn trọng show_header (tiêu đề + đề mục) và show_answers (đầy đủ / chỉ
+    đề bài). pdf_name: tên file .pdf tải về."""
     meta = meta or {}
     base_made = str(meta.get("made") or "").strip()
     ans_token = _show_answers.set(bool(show_answers))
@@ -1317,19 +1374,26 @@ def export_questions_to_html(
                         if progress_cb:
                             progress_cb(done_imgs, total_imgs,
                                         "Đang vẽ hình %d/%d" % (done_imgs + 1, max(1, total_imgs)))
-                        rendered[k] = _render_tikz(code)
+                        # Nhịp tim khi server hình còn ngủ: giữ kết nối stream sống,
+                        # tránh Render cắt trong lúc chờ ~60s cold-start.
+                        def _hb(attempt, reason, _d=done_imgs):
+                            if progress_cb:
+                                progress_cb(_d, total_imgs,
+                                            "Máy chủ hình đang khởi động, thử lại lần %d…" % attempt)
+                        rendered[k] = _render_tikz(code, on_retry=_hb)
                         done_imgs += 1
                     body.append(_question_html(qno, q, rendered))
 
             pages.append('<div class="page">%s</div>' % "".join(body))
 
+        head_script = _HTML_HEAD_SCRIPT.replace("__PDF_NAME__", json.dumps(pdf_name))
         return (
             "<!doctype html>\n<html lang=\"vi\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             "<title>%s</title>\n<style>%s</style>\n%s</head>"
             "<body>%s</body></html>"
             % (_esc((meta.get("title") or "Đề thi").strip() or "Đề thi"),
-               _HTML_CSS, _HTML_HEAD_SCRIPT, "".join(pages))
+               _HTML_CSS, head_script, "".join(pages))
         )
     finally:
         _show_answers.reset(ans_token)
