@@ -163,17 +163,29 @@ export default function App() {
           </div>
 
           {/* Thanh tab */}
-          <div className="mt-4 flex gap-1">
-            <TabButton
-              active={tab === "tex2doc"}
-              onClick={() => setTab("tex2doc")}
-              label="📝 Tex2Doc"
-            />
-            <TabButton
-              active={tab === "tikz2png"}
-              onClick={() => setTab("tikz2png")}
-              label="🖼️ Tikz2PNG"
-            />
+          <div className="mt-4 flex items-center justify-between gap-2">
+            <div className="flex gap-1">
+              <TabButton
+                active={tab === "tex2doc"}
+                onClick={() => setTab("tex2doc")}
+                label="📝 Tex2Doc"
+              />
+              <TabButton
+                active={tab === "tikz2png"}
+                onClick={() => setTab("tikz2png")}
+                label="🖼️ Tikz2PNG"
+              />
+            </div>
+            {/* Link mở trực tiếp server biên dịch TikZ -> ảnh PNG */}
+            <a
+              href="https://compile-tikz-code.onrender.com/"
+              target="_blank"
+              rel="noreferrer"
+              title="Mở server biên dịch mã TikZ thành ảnh PNG"
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/15 text-white text-xs font-semibold hover:bg-white/25 border border-white/30 transition-colors"
+            >
+              🖼️ Server biên dịch TikZ
+            </a>
           </div>
         </div>
       </header>
