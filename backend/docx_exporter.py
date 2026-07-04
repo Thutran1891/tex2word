@@ -17,7 +17,6 @@ import re
 import glob
 import copy
 import time
-import json
 import base64
 from io import BytesIO
 from html import escape as _html_escape
@@ -1256,66 +1255,30 @@ body { font-family: "Times New Roman", serif; font-size: 12pt; color: #000;
 .img-center { text-align: center; margin: 5pt 0; }
 .q-img { max-width: 100%; vertical-align: middle; }
 .img-fail { color: #b00020; font-style: italic; }
+/* Chống tách khối khi phân trang: cả câu, ô đáp án, hình… không bị cắt ngang qua 2 trang.
+   Với câu quá dài vượt 1 trang thì trình duyệt vẫn buộc phải ngắt, nhưng ngắt theo DÒNG
+   nên không xẻ ngang chữ. */
+.question { page-break-inside: avoid; break-inside: avoid; }
+.opt-table, .opt-cell, .tf-item, .sa-ans, .img-center, .stem { page-break-inside: avoid;
+                                                               break-inside: avoid; }
+.section-title, .loigiai-label { page-break-after: avoid; break-after: avoid; }
 @page { margin: 1.2cm 1.4cm; }
 @media print { .page { padding: 0; } }
 """
 
-# Nạp html2pdf + MathJax, tự dựng PDF và TẢI THẲNG về (không mở hộp thoại In).
-# - MathJax bản SVG, fontCache='none': công thức thành hình vector TỰ CHỨA (không phụ
-#   thuộc web-font). Trước khi chụp, đổi mỗi <svg> công thức thành <img> data-URI để
-#   html2canvas chụp CHẮC CHẮN (html2canvas hay bỏ sót <svg> nội tuyến).
-# - Chờ mọi ảnh (công thức + hình TikZ) decode xong rồi mới dựng PDF; xong thì báo cho
-#   trang cha qua postMessage để dọn iframe. __PDF_NAME__ được thay bằng tên file.
+# MathJax + tự mở hộp thoại In sau khi render xong (người dùng chọn "Lưu thành PDF").
+# Dùng bản SVG (không phải CHTML), fontCache='none': công thức thành hình vector TỰ CHỨA,
+# in ra chuẩn, KHÔNG phụ thuộc web-font — tránh lỗi công thức rỗng khi Chrome in trước lúc
+# nạp font. Trình duyệt phân trang theo DÒNG (không cắt ngang chữ) và chữ vẫn chọn/copy được.
 _HTML_HEAD_SCRIPT = """
-<script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.3/dist/html2pdf.bundle.min.js"></script>
 <script>
-var PDF_NAME = __PDF_NAME__;
-function _notifyDone() {
-  try { window.parent.postMessage({ __tex2word: 'pdf-done' }, '*'); } catch (e) {}
-}
-function _svgToImg() {
-  var list = document.querySelectorAll('mjx-container svg');
-  for (var i = 0; i < list.length; i++) {
-    var svg = list[i];
-    var rect = svg.getBoundingClientRect();
-    var clone = svg.cloneNode(true);
-    clone.setAttribute('width', rect.width);
-    clone.setAttribute('height', rect.height);
-    var xml = new XMLSerializer().serializeToString(clone);
-    var uri = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
-    var img = document.createElement('img');
-    img.src = uri;
-    img.style.width = rect.width + 'px';
-    img.style.height = rect.height + 'px';
-    img.style.verticalAlign = 'middle';
-    var c = svg.closest('mjx-container');
-    if (c && c.parentNode) c.parentNode.replaceChild(img, c);
-  }
-}
-function _makePdf() {
-  try { _svgToImg(); } catch (e) {}
-  var imgs = Array.prototype.slice.call(document.images);
-  Promise.all(imgs.map(function (im) {
-    if (im.complete) return Promise.resolve();
-    return new Promise(function (res) { im.onload = im.onerror = res; });
-  })).then(function () {
-    return html2pdf().set({
-      margin: 0,
-      filename: PDF_NAME,
-      image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-      pagebreak: { mode: ['css', 'legacy'] }
-    }).from(document.body).save();
-  }).then(_notifyDone, _notifyDone);
-}
 window.MathJax = {
   tex: { inlineMath: [['\\\\(', '\\\\)']], displayMath: [['\\\\[', '\\\\]'], ['$$', '$$']] },
   svg: { fontCache: 'none' },
   startup: {
     pageReady: function () {
       return MathJax.startup.defaultPageReady().then(function () {
-        setTimeout(_makePdf, 200);
+        setTimeout(function () { window.focus(); window.print(); }, 300);
       });
     }
   }
@@ -1386,14 +1349,14 @@ def export_questions_to_html(
 
             pages.append('<div class="page">%s</div>' % "".join(body))
 
-        head_script = _HTML_HEAD_SCRIPT.replace("__PDF_NAME__", json.dumps(pdf_name))
+        # <title> = tên file (bỏ .pdf): Chrome dùng nó làm tên gợi ý khi "Lưu thành PDF".
+        doc_title = re.sub(r"\.pdf$", "", pdf_name, flags=re.I).strip() or "de_thi"
         return (
             "<!doctype html>\n<html lang=\"vi\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             "<title>%s</title>\n<style>%s</style>\n%s</head>"
             "<body>%s</body></html>"
-            % (_esc((meta.get("title") or "Đề thi").strip() or "Đề thi"),
-               _HTML_CSS, head_script, "".join(pages))
+            % (_esc(doc_title), _HTML_CSS, _HTML_HEAD_SCRIPT, "".join(pages))
         )
     finally:
         _show_answers.reset(ans_token)

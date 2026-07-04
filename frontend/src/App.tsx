@@ -94,49 +94,35 @@ async function readNdjson(resp: Response, onMsg: (m: StreamMsg) => void) {
   }
 }
 
-// Dựng PDF từ tài liệu HTML (đã có sẵn MathJax + html2pdf tự chạy) trong iframe ẩn
-// ĐẶT NGOÀI màn hình nhưng CÓ KÍCH THƯỚC thật (html2canvas cần bề rộng để chụp). Tài
-// liệu tự tải file .pdf về rồi báo 'pdf-done' qua postMessage; ta chờ tín hiệu đó để
-// dọn iframe. Trả về Promise để nút giữ trạng thái "Đang tạo PDF…" tới khi xong.
-function downloadPdfFromHtml(html: string): Promise<void> {
-  return new Promise((resolve) => {
-    const old = document.getElementById("pdf-gen-frame");
-    if (old) old.remove();
-    const iframe = document.createElement("iframe");
-    iframe.id = "pdf-gen-frame";
-    iframe.style.position = "fixed";
-    iframe.style.left = "-10000px";
-    iframe.style.top = "0";
-    iframe.style.width = "800px";
-    iframe.style.height = "1200px";
-    iframe.style.border = "0";
-    document.body.appendChild(iframe);
-
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      window.removeEventListener("message", onMsg);
-      setTimeout(() => iframe.remove(), 300);
-      resolve();
-    };
-    const onMsg = (ev: MessageEvent) => {
-      const d = ev.data as { __tex2word?: string } | null;
-      if (d && d.__tex2word === "pdf-done") finish();
-    };
-    window.addEventListener("message", onMsg);
-    // Phòng hờ: nếu 90s không thấy báo xong thì tự dọn để không kẹt spinner.
-    setTimeout(finish, 90000);
-
-    const doc = iframe.contentWindow?.document;
-    if (!doc) {
-      finish();
-      return;
-    }
-    doc.open();
-    doc.write(html);
-    doc.close();
-  });
+// Mở tài liệu HTML (đã có sẵn MathJax SVG + script tự gọi print) trong iframe ẩn để bật
+// hộp thoại In của trình duyệt → người dùng chọn "Lưu thành PDF". Trình duyệt phân trang
+// theo dòng (không cắt ngang chữ) và giữ chữ vector chọn/copy được.
+function printHtmlDoc(html: string) {
+  const old = document.getElementById("pdf-print-frame");
+  if (old) old.remove();
+  const iframe = document.createElement("iframe");
+  iframe.id = "pdf-print-frame";
+  iframe.style.position = "fixed";
+  iframe.style.right = "0";
+  iframe.style.bottom = "0";
+  iframe.style.width = "0";
+  iframe.style.height = "0";
+  iframe.style.border = "0";
+  document.body.appendChild(iframe);
+  const win = iframe.contentWindow;
+  const doc = win?.document;
+  if (!win || !doc) {
+    iframe.remove();
+    return;
+  }
+  // Dọn iframe sau khi in xong (hoặc sau 5 phút phòng khi người dùng để treo hộp thoại).
+  win.onafterprint = () => setTimeout(() => iframe.remove(), 200);
+  setTimeout(() => {
+    if (document.getElementById("pdf-print-frame")) iframe.remove();
+  }, 300000);
+  doc.open();
+  doc.write(html);
+  doc.close();
 }
 
 type TabKey = "tex2doc" | "tikz2png";
@@ -409,8 +395,7 @@ function Tex2DocTab() {
     setBusy("pdf");
     try {
       const html = imgCount === 0 ? await fetchHtmlDirect() : await streamHtml(imgCount);
-      setTikz(null); // ẩn modal render hình; giai đoạn dựng PDF không có tiến trình từng phần
-      await downloadPdfFromHtml(html);
+      printHtmlDoc(html);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -587,7 +572,7 @@ function Tex2DocTab() {
             disabled={busy !== ""}
             className="inline-flex items-center gap-2 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-400 text-white font-semibold px-6 py-3 rounded-xl shadow-sm transition"
             type="button"
-            title="Dựng đề rồi tạo file PDF tải thẳng về máy (không cần mở máy in)."
+            title="Dựng đề rồi mở hộp thoại In — chọn 'Lưu thành PDF' (Save as PDF) để tải file PDF về máy."
           >
             {busy === "pdf" ? (<><Spinner /> Đang tạo PDF…</>) : (<>📄 Chuyển PDF &amp; Tải về</>)}
           </button>
