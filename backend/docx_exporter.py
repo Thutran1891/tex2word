@@ -1248,20 +1248,25 @@ body { font-family: "Times New Roman", serif; font-size: 12pt; color: #000;
 """
 
 # Config MathJax + tự động mở hộp thoại In sau khi render xong (để lưu thành PDF).
+# Dùng bản SVG (không phải CHTML): công thức thành hình vector TỰ CHỨA, in ra chuẩn,
+# KHÔNG phụ thuộc web-font — tránh lỗi công thức rỗng khi Chrome in trước lúc nạp font.
+# fontCache='none' để mỗi công thức nhúng path riêng (không tham chiếu <defs> chung, an
+# toàn khi in/sao chép).
 _HTML_HEAD_SCRIPT = """
 <script>
 window.MathJax = {
   tex: { inlineMath: [['\\\\(', '\\\\)']], displayMath: [['\\\\[', '\\\\]'], ['$$', '$$']] },
+  svg: { fontCache: 'none' },
   startup: {
     pageReady: function () {
       return MathJax.startup.defaultPageReady().then(function () {
-        setTimeout(function () { window.focus(); window.print(); }, 350);
+        setTimeout(function () { window.focus(); window.print(); }, 300);
       });
     }
   }
 };
 </script>
-<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-svg.js"></script>
 """
 
 
